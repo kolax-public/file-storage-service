@@ -69,7 +69,6 @@ export class SharesService {
   }
 
   async accessByLink(link: string, userId: number) {
-    console.log('SharesService.accessByLink input:', { link, userId });
     const share = await this.sharesRepository.findOne({
       where: { shareLink: link },
       relations: ['file', 'folder', 'sharedWith'],
@@ -77,11 +76,12 @@ export class SharesService {
     if (share?.sharedWith.id !== userId) throw new ForbiddenException();
 
     if (share.file) {
-      const fileResponse = await this.filesService.getFileShared(share.file.id);
+      const bypassPublicCheck = true  // ? TODO if you allowed public sharing 
+      const fileResponse = await this.filesService.getFileShared(share.file.id, bypassPublicCheck);
       return { ...fileResponse, permission: share.permission };
     } else if (share.folder) {
       const folderResponse = await this.foldersService.getFolderShared(share.folder.id);
-      return { ...folderResponse, permission: share.permission };
+      return { ...folderResponse, permission: share.permission }; 
     }
   }
 }

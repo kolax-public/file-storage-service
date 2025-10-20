@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn } from 'typeorm';
 import { User } from '../users/user.entity';
 import { File } from '../files/file.entity';
 import { Folder } from '../folders/folder.entity';
@@ -14,10 +14,16 @@ export class Share {
   @Column()
   permission: 'view' | 'edit';
 
-  @ManyToOne(() => File, { nullable: true })
+  @ManyToOne(() => File, (file) => file.shares, {
+    onDelete: 'CASCADE',
+  })
+  @JoinColumn({ name: 'fileId' })
   file: File;
-
-  @ManyToOne(() => Folder, { nullable: true })
+ 
+  @ManyToOne(() => Folder, (folder) => folder.shares, {
+    onDelete: 'CASCADE',
+  })
+  @JoinColumn({ name: 'folderId' })
   folder: Folder;
 
   @Column()

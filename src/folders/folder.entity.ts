@@ -1,6 +1,7 @@
 import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, OneToMany } from 'typeorm';
 import { User } from '../users/user.entity';
 import { File } from '../files/file.entity';
+import { Share } from '../shares/share.entity';
 
 @Entity()
 export class Folder {
@@ -24,4 +25,7 @@ export class Folder {
 
   @ManyToOne(() => User, (user) => user.id)
   owner: User;
+
+  @OneToMany(() => Share, (share) => share.folder)
+  shares: Share[];
 }
