@@ -6,6 +6,7 @@ import { UsersService } from '../users/users.service';
 import * as AWS from 'aws-sdk';
 import { v4 as uuid } from 'uuid';
 import { CreateFileDto } from '../common/dto/file.dto';
+import { Share } from '../shares/share.entity';
 
 @Injectable()
 export class FilesService {
@@ -14,7 +15,10 @@ export class FilesService {
   constructor(
     @InjectRepository(File)
     private filesRepository: Repository<File>,
+    @InjectRepository(Share)    
+    private sharesRepository: Repository<Share>,
     private usersService: UsersService,
+    
   ) {
     this.s3 = new AWS.S3({
       endpoint: `http://${process.env.MINIO_ENDPOINT}:${process.env.MINIO_PORT}`,
@@ -50,49 +54,135 @@ export class FilesService {
     return this.filesRepository.save(newFile);
   }
 
+
   async getFile(id: number, userId: number) {
-    const file = await this.filesRepository.findOne({ where: { id }, relations: ['owner'] });
+    const file = await this.filesRepository.findOne({
+      where: { id },
+      relations: ['owner'],
+    });
+
     if (!file) throw new NotFoundException();
-        
-    if (!file.isPublic && file.owner.id !== userId) throw new ForbiddenException();
-    const url = this.s3.getSignedUrl('getObject', { Bucket: process.env.MINIO_BUCKET, Key: file.path, Expires: 3600 });
-    return { ...file, url };
-  }
 
-  async getFileShared(id: number) {
+    const isOwner = file.owner?.id === userId;
+    const isPublic = file.isPublic;
+
+    if (isOwner || isPublic) {
+      return this.fileResponse(file);
+    }
+
+    const shared = await this.sharesRepository.exists({
+      where: {
+        file: { id },
+        sharedWith: { id: userId },
+      },
+    });
+
+    if (shared) {
+      return this.fileResponse(file);
+    }
+
+    throw new ForbiddenException();
+  }
+    
+  async getFileShared(id: number, bypassPublicCheck = false) {
     const file = await this.filesRepository.findOne({ where: { id }});
-    if (!file) throw new NotFoundException();  
-    if (!file.isPublic) throw new ForbiddenException();
+    if (!file) throw new NotFoundException();
+
+    if (!bypassPublicCheck && !file.isPublic) throw new ForbiddenException();
 
     const url = this.s3.getSignedUrl('getObject', { Bucket: process.env.MINIO_BUCKET, Key: file.path, Expires: 3600 });
     return { ...file, url };
   }
+
 
   async findAll(userId: number) {
-    return this.filesRepository.find({
+    const ownerFiles = await this.filesRepository.find({
       where: { owner: { id: userId } },
     });
+
+    const shares = await this.sharesRepository.find({
+      where: { sharedWith: { id: userId } },
+      relations: ['file'],
+    });
+
+    const sharedFiles = shares.map(item => item.file).filter(Boolean);
+
+    // ownerFiles + sharedFiles
+    const map = new Map<number, any>();
+    for (const file of ownerFiles) map.set(file.id, file);
+    for (const file of sharedFiles) if (file && !map.has(file.id)) map.set(file.id, file);
+
+    return Array.from(map.values());
   }
 
+
   async search(name: string, userId: number) {
-    return this.filesRepository.find({
+    const ownerFiles = await this.filesRepository.find({
       where: { name: Like(`%${name}%`), owner: { id: userId } },
     });
+
+    const shares = await this.sharesRepository.find({
+      where: { sharedWith: { id: userId } },
+      relations: ['file'],
+    });
+
+    const sharedFiles = shares
+      .map(s => s.file)
+      .filter(f => f && f.name && f.name.toLowerCase().includes(name.toLowerCase()));
+
+    const map = new Map<number, any>();
+    for (const file of ownerFiles) map.set(file.id, file);
+    for (const file of sharedFiles) if (file && !map.has(file.id)) map.set(file.id, file);
+
+    return Array.from(map.values());
   }
+
 
   async delete(id: number, userId: number) {
     const file = await this.filesRepository.findOne({ where: { id }, relations: ['owner'] });
-    if (!file || file.owner.id !== userId) throw new ForbiddenException();
-    await this.s3.deleteObject({ Bucket: process.env.MINIO_BUCKET, Key: file.path }).promise();
-    return this.filesRepository.remove(file);
+    if (!file) throw new NotFoundException();
+
+    if (file.owner && file.owner.id === userId) {
+      await this.s3.deleteObject({ Bucket: process.env.MINIO_BUCKET, Key: file.path }).promise();
+      return this.filesRepository.remove(file);
+    }
+
+    const share = await this.sharesRepository.findOne({
+      where: { file: { id }, sharedWith: { id: userId }, permission: 'edit' },
+      relations: ['file'],
+    });
+    if (share) {
+      await this.s3.deleteObject({ Bucket: process.env.MINIO_BUCKET, Key: file.path }).promise();
+      return this.filesRepository.remove(file);
+    }
+
+    throw new ForbiddenException();
   }
+
 
   async update(id: number, dto: Partial<CreateFileDto>, userId: number) {
     const file = await this.filesRepository.findOne({ where: { id }, relations: ['owner'] });
-    if (!file || file.owner.id !== userId) throw new ForbiddenException();
-    Object.assign(file, dto);
-    return this.filesRepository.save(file);
+    if (!file) throw new NotFoundException();
+    if (dto.folderId) {
+      file.folder = { id: dto.folderId } as any;
+    }
+    if (file.owner && file.owner.id === userId) {
+      Object.assign(file, dto);
+      return this.filesRepository.save(file);
+    }
+
+    const share = await this.sharesRepository.findOne({
+      where: { file: { id }, sharedWith: { id: userId }, permission: 'edit' },
+      relations: ['file'],
+    });
+    if (share) {
+      Object.assign(file, dto);
+      return this.filesRepository.save(file);
+    }
+
+    throw new ForbiddenException();
   }
+
 
   async clone(id: number, userId: number) {
     const file = await this.filesRepository.findOne({ where: { id }, relations: ['owner'] });
@@ -105,5 +195,15 @@ export class FilesService {
     }).promise();
     const newFile = this.filesRepository.create({ ...file, path: newKey, id: undefined });
     return this.filesRepository.save(newFile);
+  }
+
+  private fileResponse(file: any) {
+    const url = this.s3.getSignedUrl('getObject', {
+      Bucket: process.env.MINIO_BUCKET,
+      Key: file.path,
+      Expires: 3600,
+    });
+
+    return { ...file, url };
   }
 }
